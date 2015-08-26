@@ -76,12 +76,13 @@ write_files:
       EOF
 
 coreos:
-  etcd:
+  etcd2:
     name: kubernetes-node-INDEX
     discovery: https://discovery.etcd.io/DISCOVERY_ID
-    addr: $private_ipv4:4001
-    peer-addr: $private_ipv4:7001
-    peer-bind-addr: $private_ipv4:7001
+    advertise-client-urls: http://$private_ipv4:2379
+    initial-advertise-peer-urls: http://$private_ipv4:2380
+    listen-client-urls: http://127.0.0.1:2379, http://$private_ipv4:2379
+    listen-peer-urls: http://$private_ipv4:2380
 
   flannel:
     ip_masq: true
@@ -95,7 +96,7 @@ coreos:
     reboot-strategy: etcd-lock
 
   units:
-    - name: etcd.service
+    - name: etcd2.service
       command: start
     - name: fleet.service
       command: start
@@ -104,23 +105,12 @@ coreos:
         - name: 50-flannel.conf
           content: |
             [Unit]
-            Requires=etcd.service
-            After=etcd.service
+            Requires=etcd2.service
+            After=etcd2.service
 
             [Service]
             ExecStartPre=-/usr/bin/etcdctl mk /coreos.com/network/config '{"Network":"KUBE_NETWORK", "Backend": {"Type": "host-gw"}}'
       command: start
-    - name: docker.service
-      command: start
-      drop-ins:
-        - name: 51-docker-mirror.conf
-          content: |
-            [Unit]
-            # making sure that flanneld finished startup, otherwise containers
-            # won't land in flannel's network...
-            Requires=flanneld.service
-            After=flanneld.service
-            Restart=Always
     - name: download-release.service
       command: start
       content: |
@@ -142,6 +132,8 @@ coreos:
         Requires=network-online.target
         After=docker.service
         Requires=docker.service
+        After=flanneld.service
+        Requires=flanneld.service
         After=download-release.service
         Requires=download-release.service
         [Service]
@@ -217,28 +209,16 @@ coreos:
         ExecStart=/usr/bin/etcdctl exec-watch --recursive /corekube/apiservers -- /opt/bin/regen-apiserver-list.sh
         Restart=always
         RestartSec=30
-    - name: cbr0.netdev
-      command: start
-      content: |
-        [NetDev]
-        Kind=bridge
-        Name=cbr0
-    - name: cbr0.network
-      command: start
-      content: |
-        [Match]
-        Name=cbr0
-
-        [Network]
-        Address=10.240.INDEX.1/24
-    - name: nat.service
-      command: start
-      content: |
+    - name: pod-nat.service
+      command': start
+      content': |
         [Unit]
-        Description=NAT container->outside traffic
-
+        Description=NAT Pod Networks to Outside
+        Requires=flanneld.service
+        After=flanneld.service
         [Service]
-        ExecStart=/usr/sbin/iptables -t nat -A POSTROUTING -o eth0 -s 10.240.INDEX.0/24 -j MASQUERADE
-        ExecStart=/usr/sbin/iptables -t nat -A POSTROUTING -o eth1 -s 10.240.INDEX.0/24 -j MASQUERADE
+        EnvironmentFile=/run/flannel/subnet.env
+        ExecStart=/usr/sbin/iptables -w -t nat -A POSTROUTING -o eth0 -s ${FLANNEL_SUBNET} -j MASQUERADE
+        ExecStart=/usr/bin/bash -c "iptables -w -t nat -A POSTROUTING -o eth1 -s ${FLANNEL_SUBNET} -j MASQUERADE || true"
         RemainAfterExit=yes
         Type=oneshot
